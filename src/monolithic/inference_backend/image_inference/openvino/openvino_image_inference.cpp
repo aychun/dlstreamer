@@ -603,26 +603,45 @@ class OpenVinoNewApiImpl {
         switch (image.format) {
         case FourCC::FOURCC_RGBP:
         case FourCC::FOURCC_BGRP:
-            return {image_rgbp_to_tensor(image)};
+            return ensure_contiguous_for_device({image_rgbp_to_tensor(image)});
 
         case FourCC::FOURCC_BGRA:
         case FourCC::FOURCC_BGRX:
         case FourCC::FOURCC_RGBA:
         case FourCC::FOURCC_RGBX:
         case FourCC::FOURCC_BGR:
-            return {image_bgrx_to_tensor(image)};
+            return ensure_contiguous_for_device({image_bgrx_to_tensor(image)});
 
         case FourCC::FOURCC_NV12:
             if (image.type != MemoryType::VAAPI)
-                return image_nv12_to_tensor(image);
+                return ensure_contiguous_for_device(image_nv12_to_tensor(image));
             return image_nv12_surface_to_tensor(image);
 
         case FourCC::FOURCC_I420:
-            return image_i420_to_tensor(image);
+            return ensure_contiguous_for_device(image_i420_to_tensor(image));
 
         default:
             throw std::logic_error("Unsupported image type");
         }
+    }
+
+    // The OpenVINO GPU plugin imports host input tensors with a plain contiguous copy
+    // (intel_gpu SyncInferRequest::prepare_input) and ignores tensor strides. A strided
+    // ROI sub-view - built above for inference-region=roi-list, and for any padded frame -
+    // is therefore read incorrectly on GPU, feeding the model a garbled crop. Compact
+    // such tensors into contiguous memory before submitting to a GPU device. The CPU
+    // plugin honors strides, so its zero-copy views are left untouched.
+    std::vector<ov::Tensor> ensure_contiguous_for_device(std::vector<ov::Tensor> tensors) {
+        if (!is_device_gpu())
+            return tensors;
+        for (auto &tensor : tensors) {
+            if (tensor && !tensor.is_continuous()) {
+                ov::Tensor contiguous(tensor.get_element_type(), tensor.get_shape());
+                tensor.copy_to(contiguous);
+                tensor = std::move(contiguous);
+            }
+        }
+        return tensors;
     }
 
     ov::Tensor image_rgbp_to_tensor(const Image &image) {
